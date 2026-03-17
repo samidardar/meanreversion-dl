@@ -3,8 +3,9 @@ import logging
 import uuid
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from pydantic import BaseModel
+from typing import Optional
 from db.database import get_db
 from db.models import InboundConfig, Language
 
@@ -23,12 +24,12 @@ class InboundConfigCreate(BaseModel):
 
 
 class InboundConfigUpdate(BaseModel):
-    name: str | None = None
-    business_name: str | None = None
-    agent_name: str | None = None
-    is_active: bool | None = None
-    custom_instructions: str | None = None
-    knowledge_base: dict | None = None
+    name: Optional[str] = None
+    business_name: Optional[str] = None
+    agent_name: Optional[str] = None
+    is_active: Optional[bool] = None
+    custom_instructions: Optional[str] = None
+    knowledge_base: Optional[dict] = None
 
 
 @router.get("/inbound-configs", summary="List inbound configurations")
@@ -44,6 +45,8 @@ async def list_inbound_configs(db: AsyncSession = Depends(get_db)):
             "agent_name": c.agent_name,
             "is_active": c.is_active,
             "language": c.language.value,
+            "custom_instructions": c.custom_instructions,
+            "knowledge_base": c.knowledge_base,
         }
         for c in configs
     ]
@@ -54,10 +57,6 @@ async def create_inbound_config(
     payload: InboundConfigCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Create an inbound configuration for restaurant, hotel, customer support, etc.
-    The active inbound config is used when an inbound call is received.
-    """
     lang = Language.fr if payload.language.lower() in ("fr", "french") else Language.en
 
     config = InboundConfig(
@@ -100,6 +99,6 @@ async def delete_inbound_config(config_id: str, db: AsyncSession = Depends(get_d
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
-    await db.delete(config)
+    await db.execute(delete(InboundConfig).where(InboundConfig.id == config_id))
     await db.commit()
     return {"message": "Config deleted"}

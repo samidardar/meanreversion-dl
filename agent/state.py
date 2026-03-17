@@ -1,4 +1,5 @@
 """LangGraph AgentState — single source of truth for a call session."""
+from datetime import datetime
 from typing import Literal, Optional, TypedDict, Annotated
 import operator
 
@@ -27,7 +28,7 @@ class AgentState(TypedDict):
     # Conversation
     conversation_history: Annotated[list[TranscriptEntry], operator.add]
     current_transcript: str   # latest caller utterance (from STT)
-    agent_response: str        # generated agent reply
+    agent_response: str       # generated agent reply
 
     # Flow control
     call_status: Literal["initializing", "greeting", "listening", "processing", "speaking", "wrapping_up", "completed", "failed"]
@@ -44,6 +45,10 @@ class AgentState(TypedDict):
 
     # LLM routing
     use_smart_model: bool  # True for complex turns, False for simple ones
+
+    # Internal routing signals (not persisted to DB)
+    _intent: str          # set by intent_classifier, read by graph routing
+    _started_at: Optional[str]  # ISO timestamp when call started
 
     # Internal
     error_message: Optional[str]

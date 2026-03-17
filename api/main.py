@@ -1,27 +1,45 @@
 """
 FastAPI application — AI Call Center System.
 
-Endpoints:
-  POST /upload                         — CSV/Excel upload
-  GET/POST /campaigns                  — Campaign management
-  POST /campaigns/{id}/start           — Start outbound dialing
-  GET /reports                         — Call reports
-  GET /reports/{call_id}               — Single call report
-  GET /calls                           — Call list
-  GET/POST /inbound-configs            — Inbound mode configuration
-  POST /webhooks/twilio/voice          — Twilio voice webhook
-  POST /webhooks/twilio/status         — Twilio status callback
-  WS  /media/{call_id}                 — Twilio Media Streams WebSocket
+REST endpoints:
+  POST   /upload                      — CSV/Excel upload
+  GET    /campaigns                   — List campaigns
+  GET    /campaigns/{id}              — Campaign detail
+  POST   /campaigns/{id}/start        — Start dialing
+  POST   /campaigns/{id}/pause        — Pause campaign
+  GET    /stats                       — Dashboard stats
+  GET    /reports                     — Call reports list
+  GET    /reports/{call_id}           — Full report + transcript
+  GET    /calls                       — Calls list
+  GET    /inbound-configs             — Inbound configurations
+  POST   /inbound-configs             — Create inbound config
+  PATCH  /inbound-configs/{id}        — Update inbound config
+  DELETE /inbound-configs/{id}        — Delete inbound config
+  POST   /webhooks/twilio/voice       — Twilio voice webhook
+  POST   /webhooks/twilio/status      — Twilio status callback
+
+WebSocket:
+  WS     /media/{call_id}             — Twilio Media Streams
+
+Frontend:
+  GET    /                            — Redirect to dashboard
+  STATIC /app/*                       — SPA files
 """
 import logging
+import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from config.settings import settings
 from db.database import init_db, AsyncSessionLocal
 from db.models import Call, Contact, InboundConfig
+from api.middleware import SecurityHeadersMiddleware
+from api.security import verify_api_key, api_rate_limit
 from api.routes.upload import router as upload_router
 from api.routes.campaigns import router as campaigns_router
 from api.routes.reports import router as reports_router
@@ -47,60 +65,72 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Call Center",
-    description="Production-grade AI call center with LangGraph, Deepgram, Cartesia, and Twilio",
+    description="Production-grade AI call center — LangGraph + Deepgram + Cartesia + Twilio",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
 )
+
+# ── Middleware ─────────────────────────────────────────────────────────────────
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"] if settings.environment == "development" else [settings.base_url],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Register routes
-app.include_router(upload_router, tags=["Upload"])
-app.include_router(campaigns_router, tags=["Campaigns"])
-app.include_router(reports_router, tags=["Reports"])
-app.include_router(webhooks_router, tags=["Webhooks"])
-app.include_router(inbound_router, tags=["Inbound Config"])
+# ── API routes (all require auth + rate limit) ────────────────────────────────
+_api_deps = [Depends(verify_api_key), Depends(api_rate_limit)]
+
+app.include_router(upload_router,    tags=["Upload"],        dependencies=_api_deps)
+app.include_router(campaigns_router, tags=["Campaigns"],     dependencies=_api_deps)
+app.include_router(reports_router,   tags=["Reports"],       dependencies=_api_deps)
+app.include_router(inbound_router,   tags=["Inbound Config"],dependencies=_api_deps)
+
+# Twilio webhooks do NOT use API key auth (Twilio signs them with its own signature)
+app.include_router(webhooks_router,  tags=["Webhooks"])
 
 
-@app.get("/health")
+# ── Health (public) ────────────────────────────────────────────────────────────
+@app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "ok", "service": "AI Call Center"}
+    return {"status": "ok", "service": "AI Call Center", "version": "1.0.0"}
 
 
-# ─── Twilio Media Streams WebSocket ───────────────────────────────────────────
+# ── Root redirect to SPA ───────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/app/index.html")
 
+
+# ── Twilio Media Streams WebSocket ─────────────────────────────────────────────
 @app.websocket("/media/{call_id}")
 async def media_stream(call_id: str, websocket: WebSocket):
     """
-    Twilio Media Streams WebSocket endpoint.
-    One WebSocket per active call. Handles bidirectional audio streaming.
+    Twilio Media Streams WebSocket — one per active call.
+    Handles bidirectional mulaw audio streaming.
     """
     await websocket.accept()
-    logger.info("Media stream WebSocket opened for call_id=%s", call_id)
+    logger.info("Media stream opened: call_id=%s", call_id)
 
     async with AsyncSessionLocal() as db:
-        # Load call record
         result = await db.execute(select(Call).where(Call.id == call_id))
         call = result.scalar_one_or_none()
 
         if not call:
-            logger.error("No call record for call_id=%s", call_id)
-            await websocket.close()
+            logger.error("No call record for call_id=%s — closing", call_id)
+            await websocket.close(code=4004)
             return
 
-        # Load contact info
         contact_dict = {}
         if call.contact_id:
-            contact_result = await db.execute(
-                select(Contact).where(Contact.id == call.contact_id)
-            )
-            contact = contact_result.scalar_one_or_none()
+            cr = await db.execute(select(Contact).where(Contact.id == call.contact_id))
+            contact = cr.scalar_one_or_none()
             if contact:
                 contact_dict = {
                     "first_name": contact.first_name,
@@ -110,13 +140,12 @@ async def media_stream(call_id: str, websocket: WebSocket):
                     "custom_data": contact.custom_data,
                 }
 
-        # Load inbound config if applicable
         inbound_config_dict = None
         if call.mode.value == "inbound":
-            ic_result = await db.execute(
+            icr = await db.execute(
                 select(InboundConfig).where(InboundConfig.is_active == True).limit(1)
             )
-            ic = ic_result.scalar_one_or_none()
+            ic = icr.scalar_one_or_none()
             if ic:
                 inbound_config_dict = {
                     "business_name": ic.business_name,
@@ -137,12 +166,20 @@ async def media_stream(call_id: str, websocket: WebSocket):
             contact=contact_dict,
             inbound_config=inbound_config_dict,
             initial_language=language,
-            detect_language=False,  # language is pre-set from contact CSV or detected at call creation
+            detect_language=False,
         )
         await session.run(websocket)
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected for call_id=%s", call_id)
+        logger.info("WebSocket disconnected: call_id=%s", call_id)
     except Exception as e:
-        logger.error("Session error for call_id=%s: %s", call_id, e, exc_info=True)
+        logger.error("Session error call_id=%s: %s", call_id, e, exc_info=True)
     finally:
-        logger.info("Media stream closed for call_id=%s", call_id)
+        logger.info("Media stream closed: call_id=%s", call_id)
+
+
+# ── Static files — SPA (mounted last so API routes take priority) ──────────────
+_frontend_dir = Path(__file__).parent.parent / "frontend"
+if _frontend_dir.exists():
+    app.mount("/app", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+else:
+    logger.warning("Frontend directory not found at %s", _frontend_dir)

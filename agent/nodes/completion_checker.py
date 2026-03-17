@@ -26,13 +26,13 @@ Return JSON:
 - "should_wrap_up": boolean — should the agent start closing the call?
 - "reason": brief explanation
 
-Task completion criteria by type:
+Task completion criteria:
 - delivery: got confirmation (yes/no) and any special instructions
 - survey: all survey questions answered
 - reminder: got confirmation of attendance or reschedule request
-- restaurant: reservation confirmed or question answered
-- hotel: booking taken or question answered
-- support: issue resolved or escalated
+- restaurant: reservation confirmed or question fully answered
+- hotel: booking taken or question fully answered
+- support: issue resolved or escalated with ticket
 
 Respond ONLY with valid JSON."""
 
@@ -41,10 +41,10 @@ async def completion_checker_node(state: AgentState) -> dict:
     turn_count = state.get("turn_count", 0)
     max_turns = state.get("max_turns", 15)
 
-    # Force wrap-up if we hit max turns
+    # Force wrap-up if we hit max turns — treat as completed to give natural closing
     if turn_count >= max_turns:
         logger.info("Max turns reached (%d), forcing wrap-up", turn_count)
-        return {"task_completed": False, "call_status": "wrapping_up"}
+        return {"task_completed": True, "call_status": "wrapping_up"}
 
     history = state.get("conversation_history", [])
     recent = history[-6:] if len(history) >= 6 else history
@@ -57,7 +57,7 @@ async def completion_checker_node(state: AgentState) -> dict:
             messages=[{
                 "role": "user",
                 "content": COMPLETION_PROMPT.format(
-                    task_type=state["task_type"],
+                    task_type=state.get("task_type", "support"),
                     extraction_data=json.dumps(state.get("extraction_data", {})),
                     turn_count=turn_count,
                     max_turns=max_turns,

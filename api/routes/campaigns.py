@@ -12,16 +12,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-class InboundConfigCreate(BaseModel):
-    name: str
-    task_type: str  # restaurant, hotel, support, custom
-    business_name: str
-    agent_name: str = "Alex"
-    language: str = "en"
-    custom_instructions: str = ""
-    knowledge_base: dict = {}
-
-
 @router.get("/campaigns", summary="List all campaigns")
 async def list_campaigns(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Campaign).order_by(Campaign.created_at.desc()))
@@ -66,6 +56,7 @@ async def get_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
                 "name": f"{c.first_name} {c.last_name}",
                 "phone": c.phone,
                 "language": c.language.value,
+                "reason_for_call": c.reason_for_call,
             }
             for c in contacts
         ],
@@ -88,8 +79,8 @@ async def start_campaign(
     if campaign.status == CampaignStatus.completed:
         raise HTTPException(status_code=409, detail="Campaign already completed")
 
-    # Dial in background so API returns immediately
-    background_tasks.add_task(dial_campaign, campaign_id, db, concurrency)
+    # dial_campaign manages its own DB sessions — safe for background tasks
+    background_tasks.add_task(dial_campaign, campaign_id, concurrency)
 
     return {"message": f"Campaign {campaign_id} started", "concurrency": concurrency}
 
